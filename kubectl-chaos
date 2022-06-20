@@ -1,0 +1,204 @@
+#!/usr/bin/python3
+try:
+    from argparse import ArgumentParser
+    import sys
+    import ast
+    import subprocess
+    import time
+    import base64
+    import boto3
+    import botocore
+    import kubernetes
+    from kubernetes import client, config
+except ImportError as ierr:
+    print("[!] Error, missing library %s" % ierr)
+    sys.exit(1)
+
+class AWS():
+    '''
+    class to wrap AWS interactions via boto3
+    '''
+    def __init__(self, jsondata):
+        self.accesskey = jsondata.get("AccessKeyId")
+        self.secretkey = jsondata.get("SecretAccessKey")
+        self.awstoken = jsondata.get("Token")
+
+        self.session = boto3.Session(
+            aws_access_key_id=self.accesskey,
+            aws_secret_access_key=self.secretkey,
+            aws_session_token=self.awstoken,
+        )
+
+    def delete_pod(self, conf, namespace, podName):
+        """
+        params:
+            conf: Kubernetes config object
+            namespace: string value of namespace.
+            podName: string value of pod name.
+        """
+        api_instance = client.CoreV1Api(conf)
+        try:
+            api_instance.delete_namespaced_pod(podName, namespace)
+            print("[k8s] Pod deleted")
+        except kubernetes.client.exceptions.ApiException as k8serror:
+            print("[k8s] Deleting pod (%s) issue: %s" % (podName, k8serror.reason))
+            return
+
+    def __aws_s3_recon__(self):
+        """
+        perform simple describe actions against s3
+        """
+        s3 = self.session.client("s3")
+        try:
+            print("[AWS] Listing buckets...")
+            s3.list_buckets() # if/when there's permission errors,  we still want to continue with the rest of the queries
+        except botocore.exceptions.ClientError as cerror:
+            print("[AWS] %s" % cerror)
+            pass
+
+    def __aws_ec2_recon__(self):
+        """
+        perform simple describe actions against EC2
+        """
+        ec2 = self.session.client("ec2")
+        try:
+            print("[AWS] Describing instances....")
+            ec2.describe_instances() # if/when there's permission errors,  we still want to continue with the rest of the queries
+        except botocore.exceptions.ClientError as cerror:
+            print("[AWS] %s" % cerror)
+            pass
+        try:
+            print("[AWS] Describing instances status...") 
+            ec2.describe_instance_status() # if/when there's permission errors,  we still want to continue with the rest of the queries
+        except botocore.exceptions.ClientError as cerror:
+            print("[AWS] %s" % cerror)
+            pass
+        try:
+            print("[AWS] Describing snaphots...") 
+            ec2.describe_snapshots() # if/when there's permission errors,  we still want to continue with the rest of the queries
+        except botocore.exceptions.ClientError as cerror:
+            print("[AWS] %s" % cerror)
+            pass
+        try:
+            print("[AWS] Describing vpcs...") 
+            ec2.describe_vpcs() # if/when there's permission errors,  we still want to continue with the rest of the queries
+        except botocore.exceptions.ClientError as cerror:
+            print("[AWS] %s" % cerror)
+            pass
+        try:
+            print("[AWS] Describing volumes...") 
+            ec2.describe_volumes() # if/when there's permission errors,  we still want to continue with the rest of the queries
+        except botocore.exceptions.ClientError as cerror:
+            print("[AWS] %s" % cerror)
+            pass
+        try:
+            print("[AWS] Describing IGWs...") 
+            ec2.describe_internet_gateways() # if/when there's permission errors,  we still want to continue with the rest of the queries
+        except botocore.exceptions.ClientError as cerror:
+            print("[AWS] %s" % cerror)
+            pass
+        try:
+            print("[AWS] Describing NGWs...") 
+            ec2.describe_nat_gateways() # if/when there's permission errors,  we still want to continue with the rest of the queries
+        except botocore.exceptions.ClientError as cerror:
+            print("[AWS] %s" % cerror)
+            pass
+        try:
+            print("[AWS] Describing NACLs...") 
+            ec2.describe_network_acls() # if/when there's permission errors,  we still want to continue with the rest of the queries
+        except botocore.exceptions.ClientError as cerror:
+            print("[AWS] %s" % cerror)
+            pass
+
+    def chaos_aws_recon(self):
+        '''
+        Perform API requests against various AWS services.
+        Note, even if the AWS token does not have IAM permissions, the act of making the request will generate a error.
+        '''
+        print("[AWS] Performing S3 Recon")
+        self.__aws_s3_recon__()
+
+        print("[AWS] Performing EC2 Recon")
+        self.__aws_ec2_recon__()
+
+
+class k8s():
+    def __init__(self):
+        pass
+
+    def enumerate_service_tokens(self, secrets, node_token_name):
+        """
+        Enumerate secrets for specific node_token_name
+        """
+        for entry in secrets.items:
+            if node_token_name in entry.metadata.name:
+                return base64.b64decode(entry.data.get("token")).decode("ascii")
+
+    def k8s_api_enumeration(self, node_token):
+        """
+        Param: apiToken (string): APIToken of k8s service
+        perform enumeration with stoken token via param apiToken
+        """
+        subprocess.Popen(["kubectl", "auth", "can-i", "--list", "--token=" + node_token])
+        subprocess.Popen(["kubectl", "get", "pods", "-A", "--token=" + node_token])
+        subprocess.Popen(["kubectl", "get", "nodes", "-A", "--token=" + node_token])
+        subprocess.Popen(["kubectl", "get", "secrets", "-A", "--token=" + node_token])
+
+if __name__ == "__main__":
+
+    args = ArgumentParser()
+    args.add_argument("--action",
+        choices=["aws-tokens", "service-token", "dns-enum", "cleanup"],
+        required=True,
+        help="specify chaos action")
+    parser = args.parse_args()
+
+    try:
+        conf = config.load_kube_config()
+    except FileNotFoundError:
+        print("[!] Could not access kubeconfig! Does it exist? Are permissions set correctly?")
+        sys.exit(1)
+
+    kubeconf = client.CoreV1Api()
+    kube = k8s()
+
+    if parser.action == "aws-tokens":
+        # namespace and pod created via manifest
+        print("[*] Creating the privilegd pod...")
+        subprocess.Popen(["kubectl", "create", "-f", "./manfiests/privileged-pod.yml", "--request-timeout=10s"])
+        print("[*] Obtaining AWS Tokens...")
+        time.sleep(5) # let the pods get created
+        ret = kubeconf.read_namespaced_pod_log("chaos-priv-pod-aws-tokens", "chaos")
+        jsonAWSDict = ast.literal_eval(ret) # string of JSON to JSON
+        aws = AWS(jsonAWSDict)
+        aws.chaos_aws_recon()
+        aws.delete_pod(conf, "chaos", "chaos-priv-pod-aws-tokens")
+        print("[*] Deleting privileged pod!")
+        subprocess.Popen(["kubectl", "delete", "-f", "./manfiests/privileged-pod.yml"])
+
+    elif parser.action == "service-token":
+        secrets = kubeconf.list_secret_for_all_namespaces()
+        node_token = kube.enumerate_service_tokens(secrets, "aws-node-token")
+        print("[k8s] aws-node-token is %s " % node_token)
+        kube.k8s_api_enumeration(node_token)
+
+    elif parser.action == "dns-enum":
+        print("[k8s] Spinning up DNS enum pod")
+        try:
+            subprocess.Popen(["kubectl", "apply", "-f", "./manfiests/dns-enum-pod.yml"])
+        except FileNotFoundError as fnf:
+            print("[!] Error, manifest files not within current working directory!")
+            sys.exit(1)
+        print("[k8s] DNS enumeration pod deployed. Giving breathing room for dns enum")
+        time.sleep(3) # allow enough time for the pod  to perform enumeration
+        subprocess.Popen(["kubectl", "delete", "-f", "./manfiests/dns-enum-pod.yml"])
+
+    elif parser.action == "cleanup":
+        print("[*] Performing bulk resource cleanup")
+        try:
+            subprocess.Popen(["kubectl", "delete", "-f", "./manfiests"])
+        except FileNotFoundError as fnf:
+            print("[!] Error, manifest files not within current working directory!")
+        subprocess.Popen(["kubectl", "delete", "pod", "chaos-priv-pod-aws-tokens", "-n" , "chaos"])
+        subprocess.Popen(["kubectl", "delete", "pod", "chaos-dns-enum", "-n", "chaos"])
+        subprocess.Popen(["kubectl", "delete", "ns", "chaos"])

